@@ -32,6 +32,7 @@ const PRODUCTION_ORIGINS = [
   'https://www.murushop.ru',
   'https://murushop.online',
   'https://www.murushop.online',
+  'https://web.murushop.ru',
   'https://muru-blue.vercel.app',
 ]
 
