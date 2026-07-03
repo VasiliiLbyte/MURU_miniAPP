@@ -43,6 +43,8 @@ ALTER TABLE products ADD COLUMN IF NOT EXISTS weight_source TEXT NOT NULL DEFAUL
 ALTER TABLE products ADD COLUMN IF NOT EXISTS color_tags TEXT[] NOT NULL DEFAULT '{}';
 ALTER TABLE products
   ADD COLUMN IF NOT EXISTS discount_percent NUMERIC(5,2) NOT NULL DEFAULT 0;
+ALTER TABLE products ADD COLUMN IF NOT EXISTS subcategory TEXT;
+ALTER TABLE products ADD COLUMN IF NOT EXISTS subcategory_slug TEXT;
 CREATE INDEX IF NOT EXISTS idx_products_color_tags ON products USING gin(color_tags);
 
 UPDATE products
@@ -223,3 +225,15 @@ CREATE TABLE IF NOT EXISTS payments (
 CREATE INDEX IF NOT EXISTS idx_payments_yk_id ON payments(yookassa_payment_id);
 CREATE INDEX IF NOT EXISTS idx_payments_status ON payments(status) WHERE status IN ('pending','waiting_for_capture');
 CREATE INDEX IF NOT EXISTS idx_payments_user ON payments(telegram_user_id);
+
+-- web catalog placements (см. migrations/015_web_catalog_placements.sql)
+ALTER TABLE products ADD COLUMN IF NOT EXISTS web_subcategory_name TEXT;
+ALTER TABLE products ADD COLUMN IF NOT EXISTS web_subcategory_slug TEXT;
+
+CREATE TABLE IF NOT EXISTS product_web_cross_placements (
+  product_id INTEGER PRIMARY KEY REFERENCES products(id) ON DELETE CASCADE,
+  category_id INTEGER NOT NULL REFERENCES categories(id),
+  subcategory_name TEXT,
+  subcategory_slug TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_pwcp_category_id ON product_web_cross_placements(category_id);

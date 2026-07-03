@@ -18,6 +18,9 @@ import {
   resolveSheetDiscountPercent,
   resolveSheetPrice,
   resolveSkuFromRow,
+  WEB_CROSS_SUB_KEY,
+  WEB_CROSS_TOP_KEY,
+  WEB_PRIMARY_SUB_KEY,
 } from './google-sheet-headers'
 import {
   summarizeSyncErrors,
@@ -40,6 +43,13 @@ import {
 } from './google-sync-stale-products'
 import { PRODUCT_UPSERT_VALUES_SQL } from './google-sync-upsert-sql'
 import { extractDriveFileId } from '../utils/drive-file-id'
+
+type SyncProduct = Product & {
+  webSubcategoryName: string | null
+  webSubcategorySlug: string | null
+  webCrossTop: string | null
+  webCrossSub: string | null
+}
 
 const rowSchema = z.object({
   sku: z.string().min(1),
@@ -102,9 +112,16 @@ const normalizeProduct = (
   source: Record<string, string>,
   imageRefs: DriveImageRef[] | undefined,
   placeholderThumbnailUrl: string | null,
-): Product | null => {
+): SyncProduct | null => {
   const skuValue = resolveSkuFromRow(source)
   const primarySection = resolvePrimaryCatalogSection(source)
+  const webSubRaw = source[WEB_PRIMARY_SUB_KEY]?.trim() ?? ''
+  const webSubcategoryName = webSubRaw || null
+  const webSubcategorySlug = webSubRaw ? slugify(webSubRaw) : null
+  const webCrossTopRaw = source[WEB_CROSS_TOP_KEY]?.trim() ?? ''
+  const webCrossTop = webCrossTopRaw || null
+  const webCrossSubRaw = source[WEB_CROSS_SUB_KEY]?.trim() ?? ''
+  const webCrossSub = webCrossSubRaw || null
   const normalizedCategories = primarySection.trim()
   const parsed = rowSchema.safeParse({
     sku: skuValue,
@@ -182,6 +199,10 @@ const normalizeProduct = (
     dimensionsLabel: dimsLabel,
     parsedDims,
     weightGramsEstimated,
+    webSubcategoryName,
+    webSubcategorySlug,
+    webCrossTop,
+    webCrossSub,
   }
 }
 
@@ -207,15 +228,45 @@ const ensureCategoryId = async (
   return id
 }
 
+const upsertWebCrossPlacement = async (
+  client: PoolClient,
+  cache: Map<string, number>,
+  productId: number,
+  crossTop: string | null,
+  crossSub: string | null,
+): Promise<void> => {
+  if (!crossTop?.trim()) {
+    await client.query('DELETE FROM product_web_cross_placements WHERE product_id = $1', [productId])
+    return
+  }
+
+  const categoryName = mapSheetSectionToTopLevel(crossTop.trim())
+  const categoryId = await ensureCategoryId(client, cache, categoryName)
+  const subName = crossSub?.trim() || null
+  const subSlug = subName ? slugify(subName) : null
+
+  await client.query(
+    `INSERT INTO product_web_cross_placements (product_id, category_id, subcategory_name, subcategory_slug)
+     VALUES ($1, $2, $3, $4)
+     ON CONFLICT (product_id)
+     DO UPDATE SET
+       category_id = EXCLUDED.category_id,
+       subcategory_name = EXCLUDED.subcategory_name,
+       subcategory_slug = EXCLUDED.subcategory_slug`,
+    [productId, categoryId, subName, subSlug],
+  )
+}
+
 const upsertProductWithClient = async (
   client: PoolClient,
-  product: Product,
+  product: SyncProduct,
   categoryId: number,
+  categoryCache: Map<string, number>,
 ): Promise<void> => {
   const imageUrl1 = product.imageUrls[0] ?? DEFAULT_IMAGE_URL
   const imageUrl2 = product.imageUrls[1] ?? imageUrl1
   const productResult = await client.query<{ id: number }>(
-    `INSERT INTO products (sku, name, description, price, discount_percent, in_stock, specs, image_url_1, image_url_2, image_urls, category_id, color, color_tags, size, dimensions_label, updated_at)
+    `INSERT INTO products (sku, name, description, price, discount_percent, in_stock, specs, image_url_1, image_url_2, image_urls, category_id, color, color_tags, size, dimensions_label, web_subcategory_name, web_subcategory_slug, updated_at)
      VALUES ${PRODUCT_UPSERT_VALUES_SQL}
      ON CONFLICT (sku)
      DO UPDATE SET
@@ -233,6 +284,10 @@ const upsertProductWithClient = async (
        color_tags = EXCLUDED.color_tags,
        size = EXCLUDED.size,
        dimensions_label = EXCLUDED.dimensions_label,
+       subcategory = NULL,
+       subcategory_slug = NULL,
+       web_subcategory_name = EXCLUDED.web_subcategory_name,
+       web_subcategory_slug = EXCLUDED.web_subcategory_slug,
        updated_at = NOW()
      RETURNING id`,
     [
@@ -251,10 +306,19 @@ const upsertProductWithClient = async (
       product.colorTags ?? [],
       product.size ?? null,
       product.dimensionsLabel ?? '',
+      product.webSubcategoryName,
+      product.webSubcategorySlug,
     ],
   )
 
   const productId = productResult.rows[0].id
+  await upsertWebCrossPlacement(
+    client,
+    categoryCache,
+    productId,
+    product.webCrossTop,
+    product.webCrossSub,
+  )
   await client.query('DELETE FROM variants WHERE product_id = $1', [productId])
 
   for (const variant of product.variants) {
@@ -266,13 +330,14 @@ const upsertProductWithClient = async (
   }
 }
 
-const upsertOneProductIsolated = async (product: Product): Promise<void> => {
+const upsertOneProductIsolated = async (product: SyncProduct): Promise<void> => {
   const client = await pool.connect()
   try {
     await client.query('BEGIN')
     const primaryCategory = mapSheetSectionToTopLevel(product.categoryNames[0] ?? '')
     const categoryId = await ensureCategoryId(client, new Map(), primaryCategory)
-    await upsertProductWithClient(client, product, categoryId)
+    const categoryCache = new Map<string, number>()
+    await upsertProductWithClient(client, product, categoryId, categoryCache)
     await client.query('COMMIT')
   } catch (error) {
     await client.query('ROLLBACK')
@@ -283,7 +348,7 @@ const upsertOneProductIsolated = async (product: Product): Promise<void> => {
 }
 
 const upsertProductsBatched = async (
-  products: Product[],
+  products: SyncProduct[],
   onProgress?: (progress: CatalogSyncProgress) => void,
 ): Promise<{ synced: number; errors: SyncError[] }> => {
   const errors: SyncError[] = []
@@ -300,7 +365,7 @@ const upsertProductsBatched = async (
         for (const product of chunk) {
           const primaryCategory = mapSheetSectionToTopLevel(product.categoryNames[0] ?? '')
           const categoryId = await ensureCategoryId(client, categoryCache, primaryCategory)
-          await upsertProductWithClient(client, product, categoryId)
+          await upsertProductWithClient(client, product, categoryId, categoryCache)
         }
         await client.query('COMMIT')
         synced += chunk.length
@@ -383,7 +448,7 @@ export const syncCatalogFromGoogle = async (
   const errors: SyncError[] = []
   let skippedProducts = 0
   let skippedByRule = 0
-  const productsToUpsert: Product[] = []
+  const productsToUpsert: SyncProduct[] = []
   const touchedFileIds = new Set<string>()
 
   if (placeholderFileId) {
@@ -434,7 +499,7 @@ export const syncCatalogFromGoogle = async (
     processedProducts: 0,
   })
 
-  const dedupedProducts = dedupeProductsBySkuLastWins(productsToUpsert)
+  const dedupedProducts = dedupeProductsBySkuLastWins(productsToUpsert) as SyncProduct[]
   const activeSkus = collectActiveSkus(dedupedProducts)
 
   const { synced, errors: dbErrors } = await upsertProductsBatched(dedupedProducts, report)
