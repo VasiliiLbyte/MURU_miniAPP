@@ -1,3 +1,5 @@
+> ⚠️ **Репозиторий заморожен (2026-07-06).** Канон и прод-деплой: [`VasiliiLbyte/muru-backend-local`](https://github.com/VasiliiLbyte/muru-backend-local) (ветка `master`). `/var/www/muru` на VPS деплоится напрямую оттуда. Новые изменения — только в каноне, этот репозиторий не обновляется.
+
 # MURU Mini App
 
 Telegram Mini App for MURU Home Design with a React + TypeScript frontend and an Express + TypeScript backend.
